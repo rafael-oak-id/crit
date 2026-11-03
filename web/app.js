@@ -370,6 +370,13 @@
   let configAuthor = '';
   let autoViewedPatterns = [];  // config auto_viewed_patterns; applied once per launch (issue #658)
   let defaultMarkdownView = '';  // config default_markdown_view; 'document' inits markdown to document view in git mode (issue #926)
+  // Document language: '' shows files as written, 'he' shows markdown
+  // translated to Hebrew by Claude (/api/file/translate) and reads it aloud
+  // in Hebrew. Persisted in settings; translation needs a backend.
+  let docLang = getSetting('docLang', '') === 'he' ? 'he' : '';
+  let translateBackend = '';  // config translate_backend: '' when no Claude credentials
+  let translateError = '';    // config translate_error: why translateBackend is ''
+  let ttsBackend = '';        // config tts_backend: server speech synthesis, '' for the browser's
 
   // Initial viewMode for a file. File mode always opens document view, or the
   // rendered view for a file a pluggable renderer claims (*.mmd -> Diagram).
@@ -744,9 +751,20 @@
       fetch(diffUrl, { signal }).then(function(r) { return r.ok ? r.json() : { hunks: [] }; }).catch(function() { return { hunks: [] }; }),
     ]);
     if (signal && signal.aborted) return null;
-    const content = Object.prototype.hasOwnProperty.call(diffRes, 'content')
+    let content = Object.prototype.hasOwnProperty.call(diffRes, 'content')
       ? diffRes.content
       : (fileRes.content || '');
+    // A translated document is shown as a document: its lines no longer
+    // match the diff's, so the hunks and previous content are dropped.
+    let translated = false;
+    if (docLang && fi.file_type === 'markdown' && content.trim()) {
+      const translation = await translateFileContent(fi.path, docLang, signal);
+      if (signal && signal.aborted) return null;
+      if (translation !== null) {
+        content = translation;
+        translated = true;
+      }
+    }
 
     const f = {
       path: fi.path,
@@ -754,8 +772,8 @@
       status: fi.status,
       fileType: fi.file_type,
       content: content,
-      previousContent: diffRes.previous_content || '',
-      diffHunks: diffRes.hunks || [],
+      previousContent: translated ? '' : (diffRes.previous_content || ''),
+      diffHunks: translated ? [] : (diffRes.hunks || []),
       lineBlocks: null,
       previousLineBlocks: null,
       tocItems: [],
@@ -790,6 +808,48 @@
     if (fileRenderer) f.lineBlocks = renderedFileBlocks(f, fileRenderer);
 
     return f;
+  }
+
+  // The server's translation of a markdown file, or null when it failed
+  // (the file then shows as written, and a toast says why). A toast counts
+  // the translations in flight: the first of a document costs a Claude call.
+  let translationsInFlight = 0;
+
+  function showTranslationProgress() {
+    if (!translationsInFlight) {
+      dismissToast('translating');
+      return;
+    }
+    showToast('translating', 'info',
+      '<span>Translating ' + translationsInFlight + ' document' +
+      (translationsInFlight === 1 ? '' : 's') + ' to Hebrew with Claude (' + escapeHtml(translateBackend) + ')…</span>');
+  }
+
+  function translateErrorActions() {
+    return '<div class="toast-actions"><button class="toast-btn toast-btn-ghost" data-dismiss-toast="translate-error">Dismiss</button></div>';
+  }
+
+  async function translateFileContent(path, lang, signal) {
+    translationsInFlight++;
+    showTranslationProgress();
+    try {
+      const res = await fetch('/api/file/translate?path=' + enc(path) + '&lang=' + enc(lang), { signal });
+      if (!res.ok) {
+        const detail = (await res.text()).trim();
+        showToast('translate-error', 'error',
+          '<span>Could not translate ' + escapeHtml(path) + ': ' + escapeHtml(detail || ('HTTP ' + res.status)) + '</span>' + translateErrorActions());
+        return null;
+      }
+      return (await res.json()).content;
+    } catch (err) {
+      if (signal && signal.aborted) return null;
+      showToast('translate-error', 'error',
+        '<span>Could not translate ' + escapeHtml(path) + ': ' + escapeHtml(String(err && err.message || err)) + '</span>' + translateErrorActions());
+      return null;
+    } finally {
+      translationsInFlight--;
+      showTranslationProgress();
+    }
   }
 
   // Pluggable file renderer (issue #989) claiming this code file, or null.
@@ -1054,6 +1114,11 @@
     configAuthor = configRes.author || '';
     agentEnabled = configRes.agent_cmd_enabled || false;
     agentName = configRes.agent_name || 'agent';
+    translateBackend = configRes.translate_backend || '';
+    translateError = configRes.translate_error || '';
+    ttsBackend = configRes.tts_backend || '';
+    if (docLang && !translateBackend) docLang = '';
+    applyDocLang();
 
     // Build the shared Share controller (window.crit.share). It owns all share
     // state internally; we pass the config from /api/config plus app.js-specific
@@ -9100,6 +9165,7 @@
   // the text seeks to the clicked word. Clicking the header button again stops.
   const readAloudBtn = document.getElementById('readAloudToggle');
   const readAloudSupported = window.crit.readAloud.isSupported(window);
+  const docLangBtn = document.getElementById('docLangToggle');
   let readAloudReader = null;
   let readAloudFiles = null;
   let readAloudLastPath = null;
@@ -9114,6 +9180,7 @@
   function refreshReadAloud() {
     if (readAloudReader && readAloudReader.state() !== 'stopped' && readAloudFiles !== files) readAloudReader.stop();
     readAloudBtn.style.display = readAloudSupported && readAloudFileList().length ? '' : 'none';
+    docLangBtn.style.display = files.some(function(f) { return f.fileType === 'markdown'; }) ? '' : 'none';
   }
 
   // The highlight is a style rule rather than a class: the document DOM is
@@ -9186,10 +9253,102 @@
     return window.crit.readAloud.normalizeText(prefix.toString()).length;
   }
 
+  // ---- Document language (Hebrew) ----
+  // The toggle re-fetches every file: loadSingleFile asks the server for the
+  // translation while docLang is 'he'. Translations are cached on the server
+  // by content, so switching back and forth costs one Claude call per
+  // document version.
+  function applyDocLang() {
+    const container = document.getElementById('filesContainer');
+    container.classList.toggle('crit-rtl', docLang === 'he');
+    if (docLang) container.setAttribute('lang', docLang);
+    else container.removeAttribute('lang');
+    docLangBtn.classList.toggle('active', docLang === 'he');
+    docLangBtn.setAttribute('aria-pressed', docLang === 'he' ? 'true' : 'false');
+    docLangBtn.title = docLang === 'he'
+      ? 'Show documents as written'
+      : (translateBackend ? 'Read in Hebrew (translated by Claude via ' + translateBackend + ')' : 'Read in Hebrew (unavailable: ' + translateError + ')');
+    refreshReadAloudVoices();
+  }
+
+  async function setDocLang(lang) {
+    if (lang && !translateBackend) {
+      showToast('translate-error', 'error',
+        '<span>Hebrew needs Claude: ' + escapeHtml(translateError) + '</span>' + translateErrorActions());
+      return;
+    }
+    if (lang === docLang) return;
+    if (readAloudReader && readAloudReader.state() !== 'stopped') readAloudReader.stop();
+    docLang = lang;
+    setSetting('docLang', lang);
+    applyDocLang();
+    if (!session || !session.files || !session.files.length) return;
+    files = await loadAllFileData(session.files, currentFileDataScope());
+    hiddenUnresolved = session.hidden_unresolved || 0;
+    files.sort(fileSortComparator);
+    restoreViewedState();
+    renderFileTree();
+    renderAllFiles();
+    buildToc();
+    updateCommentCount();
+    updateViewedCount();
+  }
+
+  docLangBtn.addEventListener('click', function() {
+    setDocLang(docLang === 'he' ? '' : 'he');
+  });
+
+  // Speech language tag for the documents as shown; '' leaves the browser's
+  // default voice in English mode, as before.
+  function readAloudLang() {
+    return docLang === 'he' ? 'he-IL' : '';
+  }
+
+  // ---- Voice choice (Hebrew mode, browser voices) ----
+  // The select lists the browser's voices for the document language, best
+  // first, and remembers the choice per language. It is hidden in English
+  // mode (the browser default is kept) and when the server synthesizes.
+  const readAloudVoice = document.getElementById('readAloudVoice');
+
+  function readAloudVoiceSetting() {
+    return 'readAloudVoice:' + readAloudLang();
+  }
+
+  function readAloudVoices() {
+    const lang = readAloudLang();
+    if (!lang || !readAloudSupported) return [];
+    const language = lang.split('-')[0].toLowerCase();
+    return window.speechSynthesis.getVoices()
+      .filter(function(v) { return String(v.lang || '').toLowerCase().replace('_', '-').split('-')[0] === language; });
+  }
+
+  function chosenReadAloudVoice() {
+    const voices = readAloudVoices();
+    const wanted = getSetting(readAloudVoiceSetting(), '');
+    return voices.find(function(v) { return v.voiceURI === wanted; }) || window.crit.readAloud.pickVoice(voices, readAloudLang());
+  }
+
+  function refreshReadAloudVoices() {
+    if (!readAloudSupported) return;
+    const useServerSpeech = !!(ttsBackend && docLang === 'he');
+    const voices = readAloudVoices();
+    readAloudVoice.hidden = useServerSpeech || !voices.length;
+    readAloudVoice.replaceChildren();
+    if (readAloudVoice.hidden) return;
+    const chosen = chosenReadAloudVoice();
+    for (const v of voices) {
+      const opt = document.createElement('option');
+      opt.value = v.voiceURI;
+      opt.textContent = v.name + (v.localService === false ? ' (online)' : '');
+      opt.selected = chosen && v.voiceURI === chosen.voiceURI;
+      readAloudVoice.appendChild(opt);
+    }
+  }
+
   function startReadAloud() {
     const ra = window.crit.readAloud;
     let segments = [];
-    for (const f of readAloudFileList()) segments = segments.concat(ra.segmentsFromBlocks(f.path, f.lineBlocks));
+    for (const f of readAloudFileList()) segments = segments.concat(ra.segmentsFromBlocks(f.path, f.lineBlocks, null, readAloudLang()));
     const visible = firstVisibleReadAloudBlock();
     const startIndex = visible
       ? ra.startIndexFor(segments, visible.dataset.filePath, Number(visible.dataset.startLine))
@@ -9213,9 +9372,40 @@
     readAloudRate.value = String(rates.indexOf(savedRate) !== -1 ? savedRate : 1);
     readAloudVolume.value = String(savedVolume);
 
-    readAloudReader = window.crit.readAloud.createReader({
+    // Hebrew is spoken by the server's synthesizer when one is configured
+    // (ElevenLabs), else by the best browser voice for the language.
+    const synthSpeaker = window.crit.readAloud.createSynthSpeaker({
       synth: window.speechSynthesis,
       Utterance: window.SpeechSynthesisUtterance,
+      lang: readAloudLang,
+      voice: function() { return readAloudLang() ? chosenReadAloudVoice() : null; },
+    });
+    const audioSpeaker = window.crit.readAloud.createAudioSpeaker({
+      fetch: window.fetch.bind(window),
+      Audio: window.Audio,
+      url: '/api/tts',
+      createObjectURL: URL.createObjectURL.bind(URL),
+      revokeObjectURL: URL.revokeObjectURL.bind(URL),
+    });
+    const readAloudSpeaker = {
+      speak: function(text, o) {
+        (ttsBackend && docLang === 'he' ? audioSpeaker : synthSpeaker).speak(text, o);
+      },
+      cancel: function() {
+        synthSpeaker.cancel();
+        audioSpeaker.cancel();
+      },
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', refreshReadAloudVoices);
+    refreshReadAloudVoices();
+    readAloudVoice.addEventListener('change', function() {
+      setSetting(readAloudVoiceSetting(), readAloudVoice.value);
+      // Restart the current sentence so the new voice applies at once.
+      if (readAloudReader.state() === 'playing') readAloudReader.seek(readAloudReader.index(), readAloudReader.charIndex());
+    });
+
+    readAloudReader = window.crit.readAloud.createReader({
+      speaker: readAloudSpeaker,
       rate: Number(readAloudRate.value),
       volume: savedVolume,
       onSegment: onReadAloudSegment,

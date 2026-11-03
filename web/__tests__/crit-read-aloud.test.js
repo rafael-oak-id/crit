@@ -250,3 +250,115 @@ test('isSupported needs both speechSynthesis and SpeechSynthesisUtterance', () =
   assert.equal(readAloud.isSupported({ speechSynthesis: {} }), false);
   assert.equal(readAloud.isSupported(undefined), false);
 });
+
+test('segmentsFromBlocks announces code and diagrams in the document language', () => {
+  const blocks = [
+    { startLine: 1, endLine: 3, html: '', cssClass: 'code-line code-first' },
+    { startLine: 4, endLine: 4, html: '', cssClass: 'render-block' },
+  ];
+  const english = readAloud.segmentsFromBlocks('a.md', blocks, strip);
+  assert.deepEqual(english.map((s) => s.text), ['Code block.', 'Diagram.']);
+  const hebrew = readAloud.segmentsFromBlocks('a.md', blocks, strip, 'he-IL');
+  assert.deepEqual(hebrew.map((s) => s.text), ['בלוק קוד.', 'תרשים.']);
+});
+
+test('pickVoice prefers an exact language tag, then the higher-quality voice', () => {
+  const voices = [
+    { name: 'Carmit', lang: 'he-IL', voiceURI: 'carmit' },
+    { name: 'Microsoft Avri Online (Natural)', lang: 'he-IL', voiceURI: 'avri' },
+    { name: 'Carmit (Premium)', lang: 'he_IL', voiceURI: 'carmit-premium' },
+    { name: 'Samantha', lang: 'en-US', voiceURI: 'samantha' },
+    { name: 'Generic Hebrew', lang: 'he', voiceURI: 'generic' },
+  ];
+  assert.equal(readAloud.pickVoice(voices, 'he-IL').voiceURI, 'avri');
+  assert.equal(readAloud.pickVoice(voices.filter((v) => v.voiceURI !== 'avri'), 'he-IL').voiceURI, 'carmit-premium');
+  assert.equal(readAloud.pickVoice(voices, 'he').voiceURI, 'generic');
+  assert.equal(readAloud.pickVoice(voices, 'fr-FR'), null);
+  assert.equal(readAloud.pickVoice(voices, ''), null);
+});
+
+test('createSynthSpeaker sets the language and the chosen voice on each utterance', () => {
+  const { synth, Utterance } = fakeSynth();
+  const carmit = { name: 'Carmit', lang: 'he-IL', voiceURI: 'carmit' };
+  synth.getVoices = () => [{ name: 'Samantha', lang: 'en-US' }, carmit];
+  const speaker = readAloud.createSynthSpeaker({ synth, Utterance, lang: () => 'he-IL', voice: () => null });
+  const reader = readAloud.createReader({ speaker });
+  reader.start([{ text: 'שלום עולם.' }], 0);
+  assert.equal(synth.spoken[0].lang, 'he-IL');
+  assert.equal(synth.spoken[0].voice, carmit);
+});
+
+function fakeAudioEnv() {
+  const env = { requests: [], players: [], revoked: [] };
+  env.fetch = (url, init) => {
+    const req = { url, body: JSON.parse(init.body), aborted: false };
+    init.signal.addEventListener('abort', () => { req.aborted = true; });
+    env.requests.push(req);
+    return new Promise((resolve) => { req.resolve = resolve; });
+  };
+  env.Audio = function Audio(src) {
+    this.src = src;
+    this.paused = false;
+    this.play = () => Promise.resolve();
+    this.pause = () => { this.paused = true; };
+    env.players.push(this);
+  };
+  env.createObjectURL = (blob) => 'blob:' + blob.id;
+  env.revokeObjectURL = (src) => env.revoked.push(src);
+  return env;
+}
+
+function okResponse(id) {
+  return { ok: true, blob: () => Promise.resolve({ id }) };
+}
+
+test('createAudioSpeaker fetches each sentence, plays it and reports its end', async () => {
+  const env = fakeAudioEnv();
+  const speaker = readAloud.createAudioSpeaker({ fetch: env.fetch, Audio: env.Audio, url: '/api/tts',
+    createObjectURL: env.createObjectURL, revokeObjectURL: env.revokeObjectURL });
+  const seen = [];
+  const reader = readAloud.createReader({ speaker, rate: 1.5, volume: 0.5, onSegment: (s, i) => seen.push(i) });
+  reader.start([{ text: 'שלום.' }, { text: 'להתראות.' }], 0);
+  assert.deepEqual(env.requests[0].body, { text: 'שלום.' });
+  env.requests[0].resolve(okResponse('one'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(env.players[0].src, 'blob:one');
+  assert.equal(env.players[0].playbackRate, 1.5);
+  assert.equal(env.players[0].volume, 0.5);
+  env.players[0].onended();
+  assert.deepEqual(env.revoked, ['blob:one']);
+  assert.deepEqual(env.requests[1].body, { text: 'להתראות.' });
+  assert.deepEqual(seen, [0, 1]);
+});
+
+test('createAudioSpeaker stop aborts the request in flight and silences the player', async () => {
+  const env = fakeAudioEnv();
+  const speaker = readAloud.createAudioSpeaker({ fetch: env.fetch, Audio: env.Audio, url: '/api/tts',
+    createObjectURL: env.createObjectURL, revokeObjectURL: env.revokeObjectURL });
+  const reader = readAloud.createReader({ speaker });
+  reader.start([{ text: 'a.' }, { text: 'b.' }], 0);
+  env.requests[0].resolve(okResponse('a'));
+  await new Promise((r) => setImmediate(r));
+  reader.pause();
+  assert.equal(env.players[0].paused, true);
+  reader.resume();
+  assert.equal(env.requests.length, 2);
+  reader.stop();
+  assert.equal(env.requests[1].aborted, true);
+  env.requests[1].resolve(okResponse('late'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(env.players.length, 1);
+  assert.equal(reader.state(), 'stopped');
+});
+
+test('createAudioSpeaker stops the reader when the server refuses', async () => {
+  const env = fakeAudioEnv();
+  const speaker = readAloud.createAudioSpeaker({ fetch: env.fetch, Audio: env.Audio, url: '/api/tts',
+    createObjectURL: env.createObjectURL, revokeObjectURL: env.revokeObjectURL });
+  const reader = readAloud.createReader({ speaker });
+  reader.start([{ text: 'a.' }, { text: 'b.' }], 0);
+  env.requests[0].resolve({ ok: false, status: 502 });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(reader.state(), 'stopped');
+  assert.equal(env.requests.length, 1);
+});

@@ -84,22 +84,33 @@
     return String(text || '').replace(/\s+/g, ' ').replace(/^ /, '');
   }
 
+  // What a code block or diagram is announced as, per document language.
+  var ANNOUNCEMENTS = {
+    en: { diagram: 'Diagram.', code: 'Code block.' },
+    he: { diagram: 'תרשים.', code: 'בלוק קוד.' },
+  };
+
+  function announcementsFor(lang) {
+    return ANNOUNCEMENTS[String(lang || '').slice(0, 2).toLowerCase()] || ANNOUNCEMENTS.en;
+  }
+
   // Turn one file's line blocks into the segments to speak: a block's text is
   // split into sentences, each its own segment with `offset` = its position
   // in the block's text. Code is announced once ("Code block.") rather than
-  // read line by line, and diagrams likewise.
-  function segmentsFromBlocks(filePath, blocks, htmlToText) {
+  // read line by line, and diagrams likewise, in the document's language.
+  function segmentsFromBlocks(filePath, blocks, htmlToText, lang) {
     var toText = htmlToText || defaultHtmlToText;
+    var announce = announcementsFor(lang);
     var segments = [];
     for (var i = 0; i < (blocks || []).length; i++) {
       var block = blocks[i];
       if (block.isEmpty || hasClass(block, 'table-separator')) continue;
       var chunks;
       if (hasClass(block, 'render-block')) {
-        chunks = [{ text: 'Diagram.', offset: 0 }];
+        chunks = [{ text: announce.diagram, offset: 0 }];
       } else if (hasClass(block, 'code-line')) {
         if (!hasClass(block, 'code-first')) continue;
-        chunks = [{ text: 'Code block.', offset: 0 }];
+        chunks = [{ text: announce.code, offset: 0 }];
       } else {
         chunks = splitChunks(normalizeText(toText(String(block.html || '').replace(BREAKING_TAGS, '$& '))).trim());
       }
@@ -161,8 +172,138 @@
     return Math.max(min, Math.min(max, value));
   }
 
-  // opts: { synth, Utterance, rate, volume, onSegment(segment, index),
-  //         onStateChange(state) } — state is 'stopped' | 'playing' | 'paused'.
+  // Quality rank of a browser voice from its name: the neural voices Edge
+  // and Chrome OS expose ("Online (Natural)"), then macOS's downloadable
+  // Premium and Enhanced voices, then Google's, then the rest.
+  function voiceQuality(voice) {
+    var name = String(voice.name || '').toLowerCase();
+    if (/natural|neural|online/.test(name)) return 4;
+    if (/premium/.test(name)) return 3;
+    if (/enhanced/.test(name)) return 2;
+    if (/google/.test(name)) return 1;
+    return 0;
+  }
+
+  // The best voice for a BCP 47 language tag among `voices`, or null when
+  // none speaks that language. An exact tag match ("he-IL") outranks a
+  // language-only match ("he"); within a tier, the higher quality wins and
+  // the earlier voice breaks ties.
+  function pickVoice(voices, lang) {
+    var want = String(lang || '').toLowerCase();
+    if (!want) return null;
+    var language = want.split('-')[0];
+    var best = null;
+    var bestScore = -1;
+    for (var i = 0; i < (voices || []).length; i++) {
+      var tag = String(voices[i].lang || '').toLowerCase().replace('_', '-');
+      if (tag !== want && tag.split('-')[0] !== language) continue;
+      var score = (tag === want ? 10 : 0) + voiceQuality(voices[i]);
+      if (score > bestScore) {
+        best = voices[i];
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  function resolve(value) {
+    return typeof value === 'function' ? value() : value;
+  }
+
+  // Speaks with the browser's speech synthesis. opts: { synth, Utterance,
+  // lang, voice } — `lang` (a tag, or a function returning one) is set on
+  // each utterance; `voice` (a SpeechSynthesisVoice, or a function returning
+  // one or null) is used when given, else the best voice for `lang`.
+  function createSynthSpeaker(opts) {
+    var synth = opts.synth;
+    var Utterance = opts.Utterance;
+    return {
+      speak: function (text, o) {
+        var utterance = new Utterance(text);
+        utterance.rate = o.rate;
+        utterance.volume = o.volume;
+        var lang = resolve(opts.lang);
+        var voice = resolve(opts.voice) || (lang && synth.getVoices ? pickVoice(synth.getVoices(), lang) : null);
+        if (lang) utterance.lang = lang;
+        if (voice) utterance.voice = voice;
+        utterance.onboundary = function (e) {
+          if (e && e.name && e.name !== 'word') return;
+          if (e && typeof e.charIndex === 'number') o.onBoundary(e.charIndex);
+        };
+        utterance.onend = function () { o.onEnd(); };
+        utterance.onerror = function () { o.onError(); };
+        synth.speak(utterance);
+      },
+      cancel: function () { synth.cancel(); },
+    };
+  }
+
+  // Speaks with audio fetched from the server (POST `url`, JSON { text },
+  // an audio body back). opts: { fetch, Audio, url, createObjectURL,
+  // revokeObjectURL }. Server audio has no word boundaries, so a pause
+  // resumes from the start of the sentence. A cancel abandons the request
+  // in flight and the audio playing.
+  function createAudioSpeaker(opts) {
+    var current = null;
+
+    function abandon() {
+      var old = current;
+      current = null;
+      if (!old) return;
+      if (old.controller) old.controller.abort();
+      if (old.audio) {
+        old.audio.onended = null;
+        old.audio.onerror = null;
+        old.audio.pause();
+      }
+      if (old.src && opts.revokeObjectURL) opts.revokeObjectURL(old.src);
+    }
+
+    return {
+      speak: function (text, o) {
+        abandon();
+        var playback = { controller: typeof AbortController === 'function' ? new AbortController() : null };
+        current = playback;
+        opts.fetch(opts.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text }),
+          signal: playback.controller ? playback.controller.signal : undefined,
+        }).then(function (res) {
+          if (!res.ok) throw new Error('speech request failed: ' + res.status);
+          return res.blob();
+        }).then(function (blob) {
+          if (current !== playback) return;
+          playback.src = opts.createObjectURL(blob);
+          var audio = new opts.Audio(playback.src);
+          playback.audio = audio;
+          audio.playbackRate = o.rate;
+          audio.volume = o.volume;
+          audio.onended = function () {
+            if (current !== playback) return;
+            abandon();
+            o.onEnd();
+          };
+          audio.onerror = function () {
+            if (current !== playback) return;
+            abandon();
+            o.onError();
+          };
+          return audio.play();
+        }).catch(function () {
+          if (current !== playback) return;
+          abandon();
+          o.onError();
+        });
+      },
+      cancel: abandon,
+    };
+  }
+
+  // opts: { synth, Utterance, lang, voice, speaker, rate, volume,
+  //         onSegment(segment, index), onStateChange(state) } — state is
+  //         'stopped' | 'playing' | 'paused'. `speaker` (a synth or audio
+  //         speaker above) replaces the default synth speaker.
   //
   // Pause is cancel-and-remember rather than synth.pause(): Chrome's pause is
   // unreliable (it resumes nothing for some voices). The reader follows the
@@ -172,8 +313,7 @@
   // fire no boundary events resume from the start of the segment, which is a
   // sentence or less.
   function createReader(opts) {
-    var synth = opts.synth;
-    var Utterance = opts.Utterance;
+    var speaker = opts.speaker || createSynthSpeaker(opts);
     var segments = [];
     var index = 0;
     // Character in the current segment to speak from next, and the start of
@@ -218,30 +358,29 @@
         next(gen);
         return;
       }
-      var utterance = new Utterance(text);
-      utterance.rate = rate;
-      utterance.volume = volume;
-      utterance.onboundary = function (e) {
-        if (gen !== generation) return;
-        if (e && e.name && e.name !== 'word') return;
-        if (e && typeof e.charIndex === 'number') position = base + e.charIndex;
-      };
-      utterance.onend = function () {
-        if (gen !== generation) return;
-        next(gen);
-      };
-      utterance.onerror = function () {
-        if (gen !== generation) return;
-        generation++;
-        setState('stopped');
-      };
-      synth.speak(utterance);
+      speaker.speak(text, {
+        rate: rate,
+        volume: volume,
+        onBoundary: function (charIndex) {
+          if (gen !== generation) return;
+          position = base + charIndex;
+        },
+        onEnd: function () {
+          if (gen !== generation) return;
+          next(gen);
+        },
+        onError: function () {
+          if (gen !== generation) return;
+          generation++;
+          setState('stopped');
+        },
+      });
     }
 
     // Abandon the current utterance and, when playing, speak from `resumeAt`.
     function restart() {
       generation++;
-      synth.cancel();
+      speaker.cancel();
       if (state === 'playing') speakCurrent(generation);
     }
 
@@ -321,6 +460,9 @@
     positionAt: positionAt,
     normalizeText: normalizeText,
     createReader: createReader,
+    createSynthSpeaker: createSynthSpeaker,
+    createAudioSpeaker: createAudioSpeaker,
+    pickVoice: pickVoice,
     RATES: RATES,
     isSupported: isSupported,
   };

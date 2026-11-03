@@ -2965,6 +2965,41 @@ func (s *Session) GetFileSnapshot(path string) (map[string]any, bool) {
 // Used as a fallback when a scoped view references a file not in the session's file list
 // (e.g. a file changed after crit started).
 func (s *Session) GetFileSnapshotFromDisk(path string) (map[string]any, bool) {
+	data, ok := s.readRepoFile(path)
+	if !ok {
+		return nil, false
+	}
+	return map[string]any{
+		"path":      path,
+		"status":    "modified",
+		"file_type": detectFileType(path),
+		"content":   string(data),
+		"file_hash": fileHash(data),
+	}, true
+}
+
+// GetFileContent returns the current content of the file at `path`: the
+// session's copy (loaded on demand for lazy files), else the file under the
+// repo root when the session does not list it.
+func (s *Session) GetFileContent(path string) (string, bool) {
+	s.mu.RLock()
+	f := s.fileByPathLocked(path)
+	s.mu.RUnlock()
+	if f == nil {
+		data, ok := s.readRepoFile(path)
+		return string(data), ok
+	}
+	if err := s.ensureFileLoaded(f); err != nil {
+		return "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return f.Content, true
+}
+
+// readRepoFile reads a file under the repo root, refusing paths that escape
+// it before and after symlink resolution.
+func (s *Session) readRepoFile(path string) ([]byte, bool) {
 	s.mu.RLock()
 	repoRoot := s.RepoRoot
 	s.mu.RUnlock()
@@ -2997,13 +3032,7 @@ func (s *Session) GetFileSnapshotFromDisk(path string) (map[string]any, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return map[string]any{
-		"path":      path,
-		"status":    "modified",
-		"file_type": detectFileType(path),
-		"content":   string(data),
-		"file_hash": fileHash(data),
-	}, true
+	return data, true
 }
 
 // whitespaceIgnoredHunks recomputes a fresh whitespace-ignored diff for a

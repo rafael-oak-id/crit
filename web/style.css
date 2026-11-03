@@ -459,6 +459,12 @@ body {
 #readAloudToggle.active .read-aloud-wave { display: none; }
 #readAloudToggle.active .read-aloud-stop { display: inline; }
 
+/* Document language: "עב" toggles Hebrew translation of the documents. */
+.doc-lang-toggle { font-size: 12px; font-weight: 600; line-height: 16px; min-width: 30px; }
+.doc-lang-toggle.active { color: var(--crit-brand); background: var(--crit-brand-subtle); }
+/* Translated documents read right-to-left; code keeps its direction. */
+.crit-rtl .line-content:not(.code-line) { direction: rtl; text-align: right; }
+
 .read-aloud-bar {
   position: fixed;
   bottom: 20px;
@@ -498,6 +504,7 @@ body {
 .read-aloud-seek { width: 180px; min-width: 60px; flex-shrink: 1; accent-color: var(--crit-brand); }
 .read-aloud-volume { width: 70px; accent-color: var(--crit-brand); }
 .read-aloud-pos { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+.read-aloud-voice { max-width: 160px; }
 .read-aloud-rate {
   background: var(--crit-editor-bg);
   color: var(--crit-editor-fg);
@@ -3848,7 +3855,7 @@ html[data-theme="light"] .updates-agent-icon-light { display: block !important; 
   .pr-toggle-btn .pr-toggle-number { display: none; }
 }
 @media (max-width: 600px) {
-  .toc, #tocToggle, #readAloudToggle { display: none !important; }
+  .toc, #tocToggle, #readAloudToggle, #docLangToggle { display: none !important; }
   .comments-panel, .pr-panel { display: none !important; }
   .header { padding: 10px 14px; }
   .header-context { display: none; }

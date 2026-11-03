@@ -117,6 +117,7 @@
     <button class="theme-toggle" id="readAloudToggle" style="display:none" title="Read aloud (Shift+L)" aria-label="Read aloud" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6v4h2.5l3.5 3V3L5 6H2.5Z"/><path class="read-aloud-wave" d="M10.75 5.75a3 3 0 0 1 0 4.5M12.5 4a5.5 5.5 0 0 1 0 8"/><path class="read-aloud-stop" d="M10.5 6l4 4M14.5 6l-4 4"/></svg>
     </button>
+    <button class="theme-toggle doc-lang-toggle" id="docLangToggle" style="display:none" title="Read in Hebrew (translated by Claude)" aria-label="Read in Hebrew" aria-pressed="false">עב</button>
     <button class="theme-toggle" id="tocToggle" title="Table of contents" aria-label="Table of contents">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke-linecap="round"/></svg>
     </button>
@@ -150,6 +151,7 @@
   <input type="range" class="read-aloud-seek" id="readAloudSeek" min="0" max="0" step="1" value="0" aria-label="Position in document">
   <span class="read-aloud-pos" id="readAloudPos" aria-live="off"></span>
   <select class="read-aloud-rate" id="readAloudRate" aria-label="Speed" title="Speed"></select>
+  <select class="read-aloud-rate read-aloud-voice" id="readAloudVoice" aria-label="Voice" title="Voice" hidden></select>
   <svg class="read-aloud-volume-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6v4h2.5l3.5 3V3L5 6H2.5Z"/><path d="M10.75 5.75a3 3 0 0 1 0 4.5" stroke-linecap="round"/></svg>
   <input type="range" class="read-aloud-volume" id="readAloudVolume" min="0" max="1" step="0.05" value="1" aria-label="Volume" title="Volume">
   <button type="button" class="read-aloud-bar-btn" id="readAloudStop" title="Stop reading" aria-label="Stop reading">

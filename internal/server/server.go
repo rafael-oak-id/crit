@@ -128,6 +128,14 @@ type Server struct {
 	codeFontFamiliesLoaded bool
 	codeFontFamilies       []string
 	codeFontDiscovery      func() ([]string, error)
+
+	// translator renders a markdown document in another language for the
+	// read-aloud feature; nil when no Claude credentials were found, with
+	// translateErr saying why. synth speaks sentences through a cloud voice;
+	// nil when none is configured and the browser's own voices are used.
+	translator   documentTranslator
+	translateErr error
+	synth        speechSynthesizer
 }
 
 // NewServer creates a Server with the given session and configuration.
@@ -136,6 +144,7 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 	if session != nil {
 		s.session.Store(session)
 	}
+	s.readAloudServices()
 
 	mux := http.NewServeMux()
 
@@ -215,6 +224,8 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, proxyAuth
 
 	// File-scoped endpoints (use ?path= query param)
 	mux.HandleFunc("/api/file", s.withReady(s.handleFile))
+	mux.HandleFunc("/api/file/translate", s.withReady(s.handleFileTranslate))
+	mux.HandleFunc("/api/tts", s.withReady(s.handleTTS))
 	mux.HandleFunc("/api/file/diff", s.withReady(s.handleFileDiff))
 	mux.HandleFunc("/api/file/comments", s.withReady(s.handleFileComments))
 	mux.HandleFunc("/api/comment/", s.withReady(s.handleCommentByID))
@@ -544,6 +555,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) { //nolint
 
 		// Available integrations (always included)
 		"integrations_available": availableIntegrations(),
+
+		// Read aloud: how documents are translated ("" when they cannot be,
+		// with the reason) and which cloud voice speaks them ("" for the
+		// browser's own voices).
+		"translate_backend": s.translateBackend(),
+		"translate_error":   s.translateError(),
+		"tts_backend":       s.ttsBackend(),
 	}
 	// Compatibility fields for older external consumers; the embedded browser
 	// uses share_targets exclusively.
